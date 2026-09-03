@@ -1,0 +1,7 @@
+# Use Python 3.11 or 3.12 (recommended). Python 3.14 may lack pre-built wheels.
+fastapi>=0.115.0,<0.116
+uvicorn[standard]>=0.32.0,<0.33
+httpx>=0.27.0,<0.28
+pydantic>=2.10.0,<3
+python-multipart>=0.0.9
+python-dotenv>=1.0.1

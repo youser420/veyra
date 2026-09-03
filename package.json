@@ -1,0 +1,11 @@
+{
+  "name": "veyra",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "npm run dev -w apps/web",
+    "dev:clean": "npm run dev:clean -w apps/web",
+    "build": "npm run build -w apps/web",
+    "lint": "npm run lint -w apps/web"
+  }
+}

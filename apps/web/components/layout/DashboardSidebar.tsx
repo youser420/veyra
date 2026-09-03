@@ -41,7 +41,9 @@ export function DashboardSidebar() {
     <aside className="w-[220px] border-r border-border bg-bg-2 p-4">
       <div className="mb-5 font-mono text-gold">Creator Console</div>
       <div className="space-y-2 text-sm text-text-2">
-        {links.map(({ label, href, notify }) => {
+        {links.map((link) => {
+          const { label, href } = link;
+          const notify = "notify" in link && link.notify;
           const active = pathname === href || pathname.startsWith(`${href}/`);
           const hasAlert = notify && activeIncidents > 0;
           return (

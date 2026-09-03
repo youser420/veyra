@@ -25,8 +25,11 @@ export async function GET(_: Request, { params }: { params: { runId: string } })
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
   }
 
-  const agent = run.agents as { creator_id: string };
-  if (agent.creator_id !== user.id) {
+  const agentRel = run.agents as unknown as
+    | { creator_id: string }
+    | { creator_id: string }[];
+  const agent = Array.isArray(agentRel) ? agentRel[0] : agentRel;
+  if (!agent || agent.creator_id !== user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

@@ -1,0 +1,4 @@
+# Container and shell files must use LF even when committed from Windows,
+# otherwise a trailing CR breaks shell-form Docker CMD/ENTRYPOINT and scripts.
+Dockerfile      text eol=lf
+*.sh            text eol=lf

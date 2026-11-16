@@ -4,7 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { OtpInput } from "@/components/auth/OtpInput";
-import { enabledOAuthProviders, safeNextPath, type OAuthProvider } from "@/lib/auth-redirect";
+import { safeNextPath, type OAuthProvider } from "@/lib/auth-redirect";
 
 type Step = "start" | "sent" | "password";
 
@@ -22,11 +22,10 @@ const primaryButton = "w-full rounded bg-gold px-4 py-2.5 text-black disabled:op
 const linkButton = "text-sm text-teal hover:underline disabled:opacity-60";
 
 /** Sign in and sign up are the same flow: a new email or OAuth identity creates the account. */
-export function AuthCard() {
+export function AuthCard({ providers }: { providers: OAuthProvider[] }) {
   const router = useRouter();
   const params = useSearchParams();
   const next = safeNextPath(params.get("next"));
-  const providers = enabledOAuthProviders();
 
   const [step, setStep] = useState<Step>("start");
   const [email, setEmail] = useState("");

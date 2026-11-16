@@ -25,3 +25,21 @@ services:
         sync: false
       - key: MONITOR_INTERVAL_DAYS
         value: "7"
+
+  # Public test agents for end-to-end checks of the live site (scripts/mock_agent.py):
+  #   /run    (generic_http, category General) → should be VERIFIED
+  #   /invoke (langchain)                       → should be VERIFIED
+  #   /refuse, /echo                            → should FAIL
+  # Holds no secrets. Sleeps when idle, so it shares the free hours with the engine.
+  - type: web
+    name: veyra-mock-agent
+    runtime: docker
+    plan: free
+    rootDir: apps/verification-engine
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: APP_MODULE
+        value: scripts.mock_agent:app

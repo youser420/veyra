@@ -42,7 +42,7 @@ export function SubscribeModal({
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) {
-      router.push("/signup");
+      router.push(`/login?next=${encodeURIComponent(window.location.pathname)}`);
       return null;
     }
     return user;

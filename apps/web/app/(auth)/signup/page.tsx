@@ -1,5 +1,6 @@
-import { AuthCard } from "@/components/auth/AuthCard";
+import { redirect } from "next/navigation";
 
-export default function SignupPage() {
-  return <AuthCard initialMode="signup" />;
+/** Sign up and sign in are one flow now; keep /signup working for old links. */
+export default function SignupPage({ searchParams }: { searchParams: { next?: string } }) {
+  redirect(searchParams.next ? `/login?next=${encodeURIComponent(searchParams.next)}` : "/login");
 }

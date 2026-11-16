@@ -2,6 +2,7 @@
 
 import { useRef, KeyboardEvent, ClipboardEvent } from "react";
 
+/** One box per digit; the number of boxes is value.length. Paste fills all boxes at once. */
 export function OtpInput({
   value,
   onChange,
@@ -10,12 +11,15 @@ export function OtpInput({
   onChange: (digits: string[]) => void;
 }) {
   const refs = useRef<(HTMLInputElement | null)[]>([]);
+  const length = value.length;
 
-  const updateDigit = (index: number, digit: string) => {
+  const fill = (raw: string, from: number) => {
+    const digits = raw.replace(/\D/g, "").slice(0, length - from);
+    if (!digits) return;
     const next = [...value];
-    next[index] = digit;
+    for (let i = 0; i < digits.length; i++) next[from + i] = digits[i];
     onChange(next);
-    if (digit && index < 5) refs.current[index + 1]?.focus();
+    refs.current[Math.min(from + digits.length, length - 1)]?.focus();
   };
 
   const onKeyDown = (index: number, e: KeyboardEvent<HTMLInputElement>) => {
@@ -24,17 +28,13 @@ export function OtpInput({
     }
   };
 
-  const onPaste = (e: ClipboardEvent<HTMLInputElement>) => {
+  const onPaste = (index: number, e: ClipboardEvent<HTMLInputElement>) => {
     e.preventDefault();
-    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
-    if (!pasted) return;
-    const next = Array.from({ length: 6 }, (_, i) => pasted[i] ?? "");
-    onChange(next);
-    refs.current[Math.min(pasted.length, 5)]?.focus();
+    fill(e.clipboardData.getData("text"), index === length - 1 ? 0 : index);
   };
 
   return (
-    <div className="flex justify-center gap-2">
+    <div className="flex justify-center gap-1.5">
       {value.map((digit, i) => (
         <input
           key={i}
@@ -43,12 +43,21 @@ export function OtpInput({
           }}
           type="text"
           inputMode="numeric"
-          maxLength={1}
+          autoComplete={i === 0 ? "one-time-code" : "off"}
+          autoFocus={i === 0}
+          aria-label={`Digit ${i + 1} of ${length}`}
           value={digit}
           onKeyDown={(e) => onKeyDown(i, e)}
-          onPaste={onPaste}
-          onChange={(e) => updateDigit(i, e.target.value.replace(/\D/g, "").slice(0, 1))}
-          className="h-12 w-10 rounded border border-border bg-bg-3 text-center font-mono text-lg focus:border-gold focus:outline-none"
+          onPaste={(e) => onPaste(i, e)}
+          onChange={(e) => {
+            const typed = e.target.value.replace(/\D/g, "");
+            if (typed.length > 1) return fill(typed, i); // browser autofill / fast typing
+            const next = [...value];
+            next[i] = typed;
+            onChange(next);
+            if (typed && i < length - 1) refs.current[i + 1]?.focus();
+          }}
+          className="h-12 w-9 rounded border border-border bg-bg-3 text-center font-mono text-lg focus:border-gold focus:outline-none"
         />
       ))}
     </div>

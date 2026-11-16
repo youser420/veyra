@@ -1,8 +1,18 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
+import { safeNextPath } from "@/lib/auth-redirect";
 
 export async function middleware(req: NextRequest) {
+  // Supabase falls back to the Site URL when /auth/callback isn't in its allowed
+  // redirect list; forward the code instead of silently dropping the sign-in.
+  if (req.nextUrl.pathname === "/") {
+    if (!req.nextUrl.searchParams.has("code")) return NextResponse.next();
+    const callback = new URL("/auth/callback", req.url);
+    callback.search = req.nextUrl.search;
+    return NextResponse.redirect(callback);
+  }
+
   if (!isSupabaseConfigured()) {
     return NextResponse.next();
   }
@@ -32,15 +42,25 @@ export async function middleware(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const { pathname, search } = req.nextUrl;
+
   const protectedPaths = ["/dashboard", "/verify"];
-  if (
-    protectedPaths.some((p) => req.nextUrl.pathname.startsWith(p)) &&
-    !user
-  ) {
-    return NextResponse.redirect(new URL("/login", req.url));
+  if (protectedPaths.some((p) => pathname.startsWith(p)) && !user) {
+    const login = new URL("/login", req.url);
+    login.searchParams.set("next", pathname + search);
+    return NextResponse.redirect(login);
+  }
+
+  // Already signed in: skip the login page.
+  if ((pathname === "/login" || pathname === "/signup") && user) {
+    return NextResponse.redirect(
+      new URL(safeNextPath(req.nextUrl.searchParams.get("next")), req.url)
+    );
   }
 
   return res;
 }
 
-export const config = { matcher: ["/dashboard/:path*", "/verify/:path*"] };
+export const config = {
+  matcher: ["/", "/dashboard/:path*", "/verify/:path*", "/login", "/signup"],
+};

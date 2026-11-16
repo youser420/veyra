@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { startMonitorRun } from "@/lib/monitoring";
 
+// First dispatch may wait for the engine (Render free tier) to wake up.
+export const maxDuration = 60;
+
 function authorize(req: Request) {
   const expected = process.env.CRON_SECRET;
   if (!expected) return false;
@@ -62,7 +65,10 @@ export async function POST(req: Request) {
       await startMonitorRun(supabase, agent);
       queued.push(agent.id);
     } catch (e) {
+      // Usually the engine is down or still waking; the rest will be retried next tick
+      // rather than each waiting out the dispatch timeout.
       console.error(`Monitor queue failed for ${agent.id}:`, e);
+      break;
     }
   }
 

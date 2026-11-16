@@ -3,6 +3,10 @@ import { requireAuthUser } from "@/lib/auth";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { isSupabaseConfigured, supabaseConfigErrorResponse } from "@/lib/supabase/env";
 import { CHECK_NAMES as CHECKS } from "@/lib/constants/checkWeights";
+import { dispatchToEngine, markDispatchFailed } from "@/lib/engine";
+
+// Allows the engine (Render free tier) time to wake from sleep before accepting the run.
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   if (!isSupabaseConfigured()) {
@@ -117,30 +121,20 @@ export async function POST(req: Request) {
     .from("check_results")
     .insert(CHECKS.map((check_name) => ({ run_id: run.id, check_name, status: "pending" })));
 
-  const engineUrl = process.env.VERIFICATION_ENGINE_URL?.replace(
-    /\/\/localhost\b/i,
-    "//127.0.0.1"
-  );
-  if (engineUrl) {
-    fetch(`${engineUrl}/verify`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-engine-secret": process.env.VERIFICATION_ENGINE_SECRET || "",
-      },
-      body: JSON.stringify({
-        run_id: run.id,
-        agent_id: agent.id,
-        // From the saved row: on re-verify the request body may omit the endpoint.
-        endpoint_url: agent.endpoint_url,
-        config_file_path: agent.config_file_path,
-        category: agent.category,
-        framework,
-        submission_method: method,
-      }),
-    }).catch((err) => console.error("Verification engine dispatch failed:", err));
-  } else {
-    console.warn("VERIFICATION_ENGINE_URL not set — verification will not run");
+  const dispatch = await dispatchToEngine({
+    run_id: run.id,
+    agent_id: agent.id,
+    // From the saved row: on re-verify the request body may omit the endpoint.
+    endpoint_url: agent.endpoint_url,
+    config_file_path: agent.config_file_path,
+    category: agent.category,
+    framework,
+    submission_method: method,
+  });
+  if (!dispatch.ok) {
+    console.error(`Verification engine dispatch failed for run ${run.id}: ${dispatch.error}`);
+    await markDispatchFailed(supabase, run.id, dispatch.error, agent.id);
+    return NextResponse.json({ error: dispatch.error }, { status: 503 });
   }
 
   return NextResponse.json({ runId: run.id, agentId: agent.id, framework });

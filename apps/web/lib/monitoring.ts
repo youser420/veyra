@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { CHECK_NAMES as CHECKS } from "@/lib/constants/checkWeights";
+import { dispatchToEngine, markDispatchFailed } from "@/lib/engine";
 
 export type AgentRow = {
   id: string;
@@ -36,25 +37,20 @@ export async function startMonitorRun(supabase: SupabaseClient, agent: AgentRow)
     .from("check_results")
     .insert(CHECKS.map((check_name) => ({ run_id: run.id, check_name, status: "pending" })));
 
-  const engineUrl = process.env.VERIFICATION_ENGINE_URL?.replace(/\/\/localhost\b/i, "//127.0.0.1");
-  if (engineUrl) {
-    await fetch(`${engineUrl}/verify`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-engine-secret": process.env.VERIFICATION_ENGINE_SECRET || "",
-      },
-      body: JSON.stringify({
-        run_id: run.id,
-        agent_id: agent.id,
-        endpoint_url: agent.endpoint_url,
-        config_file_path: agent.config_file_path,
-        category: agent.category,
-        framework,
-        submission_method: method,
-        run_type: "monitor",
-      }),
-    });
+  const dispatch = await dispatchToEngine({
+    run_id: run.id,
+    agent_id: agent.id,
+    endpoint_url: agent.endpoint_url,
+    config_file_path: agent.config_file_path,
+    category: agent.category,
+    framework,
+    submission_method: method,
+    run_type: "monitor",
+  });
+  if (!dispatch.ok) {
+    // Agent untouched: next_monitor_at isn't advanced, so the next cron tick retries it.
+    await markDispatchFailed(supabase, run.id, dispatch.error);
+    throw new Error(dispatch.error);
   }
 
   return run.id as string;

@@ -1,0 +1,27 @@
+# Render Blueprint for the verification engine (free tier).
+# In Render: New → Blueprint → select this repo. Secrets marked `sync: false`
+# are prompted for on first deploy and never stored in the repo.
+#
+# Free instances sleep after 15 idle minutes and take ~30-60s to wake; the web app's
+# dispatch (apps/web/lib/engine.ts) waits for that.
+services:
+  - type: web
+    name: veyra-verification-engine
+    runtime: docker
+    plan: free
+    rootDir: apps/verification-engine
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: VERIFICATION_ENGINE_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MONITOR_INTERVAL_DAYS
+        value: "7"

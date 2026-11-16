@@ -18,7 +18,10 @@ Monorepo with Next.js web app (`apps/web`), Supabase migration (`supabase/migrat
 
 ## Deploy
 - Web/API on Vercel
-- Verification engine on Railway/Render using `apps/verification-engine/Dockerfile`
+- Verification engine on Render (free tier) via the `render.yaml` Blueprint: Render → New → Blueprint →
+  this repo, then enter `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `VERIFICATION_ENGINE_SECRET` and
+  `ANTHROPIC_API_KEY` when prompted. Set Vercel's `VERIFICATION_ENGINE_URL` to the Render service URL.
+  Free instances sleep when idle; the first verification after a quiet spell waits ~30-60s for it to wake.
 
 ## Production checklist
 1. Run `supabase/migrations/001_initial.sql` in Supabase SQL Editor.

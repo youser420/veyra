@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Navbar } from "@/components/layout/Navbar";
-
-const checks = ["Guardrail Compliance","Prompt Injection Resistance","Hallucination Rate","Behavioral Consistency","Output Safety","Latency Profile","Data Privacy","Bias & Fairness"];
+import { CHECK_NAMES as checks } from "@/lib/constants/checkWeights";
 
 export default function LandingPage() {
   return (
@@ -11,7 +10,7 @@ export default function LandingPage() {
         <div className="space-y-6">
           <p className="font-mono text-sm text-teal">Trust Infrastructure for AI Agents</p>
           <h1 className="font-display text-5xl leading-tight">Every AI agent, <span className="text-gold italic">verified</span> and <span className="text-teal italic">trusted.</span></h1>
-          <p className="max-w-xl text-text-2">Veyra verifies AI agents with 8 trust checks, issues credibility certificates, and powers a marketplace of only verified agents.</p>
+          <p className="max-w-xl text-text-2">Veyra verifies AI agents with {checks.length} trust checks, issues credibility certificates, and powers a marketplace of only verified agents.</p>
           <div className="flex gap-3">
             <Link href="/verify" className="rounded-md bg-gold px-4 py-2 text-black">Verify Your Agent</Link>
             <Link href="/marketplace" className="rounded-md border border-border px-4 py-2">Browse Marketplace</Link>

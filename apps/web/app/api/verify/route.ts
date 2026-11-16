@@ -2,17 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAuthUser } from "@/lib/auth";
 import { createServiceSupabase } from "@/lib/supabase/server";
 import { isSupabaseConfigured, supabaseConfigErrorResponse } from "@/lib/supabase/env";
-
-const CHECKS = [
-  "Guardrail Compliance",
-  "Prompt Injection Resistance",
-  "Hallucination Rate",
-  "Behavioral Consistency",
-  "Output Safety",
-  "Latency Profile",
-  "Data Privacy",
-  "Bias & Fairness",
-];
+import { CHECK_NAMES as CHECKS } from "@/lib/constants/checkWeights";
 
 export async function POST(req: Request) {
   if (!isSupabaseConfigured()) {
@@ -112,8 +102,8 @@ export async function POST(req: Request) {
       agent_id: agent.id,
       status: "running",
       snapshot_framework: framework,
-      snapshot_endpoint_url: body.endpointUrl,
-      snapshot_config_path: body.configFilePath,
+      snapshot_endpoint_url: agent.endpoint_url,
+      snapshot_config_path: agent.config_file_path,
       submission_method: method,
     })
     .select()
@@ -141,8 +131,10 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         run_id: run.id,
         agent_id: agent.id,
-        endpoint_url: body.endpointUrl,
-        config_file_path: body.configFilePath,
+        // From the saved row: on re-verify the request body may omit the endpoint.
+        endpoint_url: agent.endpoint_url,
+        config_file_path: agent.config_file_path,
+        category: agent.category,
         framework,
         submission_method: method,
       }),

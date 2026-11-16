@@ -3,30 +3,31 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 from typing import Any
 
 import httpx
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+import db
+
+log = logging.getLogger("veyra.config")
 BUCKET = "agent-configs"
 
 
 async def load_agent_config(path: str | None) -> dict[str, Any] | None:
-    if not path or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    if not path or not db.configured():
         return None
 
-    url = f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{path}"
+    url = f"{db.SUPABASE_URL}/storage/v1/object/{BUCKET}/{path}"
     headers = {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "apikey": db.SUPABASE_SERVICE_KEY or "",
+        "Authorization": f"Bearer {db.SUPABASE_SERVICE_KEY}",
     }
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         res = await client.get(url, headers=headers)
         if res.status_code >= 400:
-            print(f"[engine] config load failed ({path}): {res.status_code}")
+            log.warning("config load failed (%s): %s", path, res.status_code)
             return None
 
         raw = res.text

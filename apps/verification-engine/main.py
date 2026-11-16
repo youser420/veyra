@@ -2,26 +2,34 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, BackgroundTasks, Header, HTTPException
-from pydantic import BaseModel
-import httpx
-import os
-import asyncio
-import random
 import datetime
+import hmac
+import logging
+import os
+from typing import Any
 
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
+from pydantic import BaseModel
+
+import db
 from adapters import get_adapter
-from adapters.base import AgentAdapter
-from config_loader import load_agent_config
 from checks.common import CheckContext
-from checks.scoring import weighted_final_score
-from checks import guardrails, prompt_injection, hallucination, consistency, safety, latency, data_privacy, bias
+from checks.domains import resolve_category
+from checks.probes import PROBE_SET_VERSION, ProbeFactory
+from checks.scoring import Outcome, check_passed
+from config_loader import load_agent_config
+from judge import Judge, get_judge
+from pipeline import CHECK_NAMES, run_checks
+from security import UnsafeEndpointError, validate_endpoint
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+log = logging.getLogger("veyra.engine")
 
 app = FastAPI(title="Veyra Verification Engine")
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 ENGINE_SECRET = os.getenv("VERIFICATION_ENGINE_SECRET")
+CERTIFICATE_DAYS = 90
 
 
 class VerifyRequest(BaseModel):
@@ -31,6 +39,7 @@ class VerifyRequest(BaseModel):
     config_file_path: str | None = None
     framework: str = "generic_http"
     submission_method: str | None = None
+    category: str | None = None
     run_type: str = "verification"
 
 
@@ -38,148 +47,215 @@ class VerifyRequest(BaseModel):
 async def health():
     from adapters.registry import list_frameworks
 
-    return {"status": "ok", "frameworks": list_frameworks()}
+    return {
+        "status": "ok",
+        "frameworks": list_frameworks(),
+        "probe_set_version": PROBE_SET_VERSION,
+        "judge": get_judge().mode,
+    }
 
 
 @app.post("/verify")
-async def verify(req: VerifyRequest, background_tasks: BackgroundTasks, x_engine_secret: str = Header(None)):
-    if x_engine_secret != ENGINE_SECRET:
+async def verify(
+    req: VerifyRequest,
+    background_tasks: BackgroundTasks,
+    x_engine_secret: str | None = Header(None),
+):
+    if not ENGINE_SECRET:
+        log.error("VERIFICATION_ENGINE_SECRET is not set — refusing all requests")
+        raise HTTPException(status_code=503, detail="Engine not configured")
+    if not x_engine_secret or not hmac.compare_digest(
+        x_engine_secret.encode(), ENGINE_SECRET.encode()
+    ):
         raise HTTPException(status_code=401)
     background_tasks.add_task(run_verification, req)
     return {"status": "queued", "framework": req.framework}
 
 
-async def run_verification(req: VerifyRequest):
+async def run_verification(req: VerifyRequest) -> None:
+    try:
+        await _run(req)
+    except Exception:
+        log.exception("verification run %s crashed", req.run_id)
+        await _mark_errored(req, "Internal verification error — the run was not scored.")
+
+
+async def _run(req: VerifyRequest) -> None:
+    await db.patch(
+        "verification_runs",
+        {"id": f"eq.{req.run_id}"},
+        {
+            "snapshot_framework": req.framework,
+            "snapshot_endpoint_url": req.endpoint_url,
+            "snapshot_config_path": req.config_file_path,
+            "submission_method": req.submission_method,
+        },
+    )
+
     adapter = get_adapter(
         framework=req.framework,
         endpoint_url=req.endpoint_url,
         config_file_path=req.config_file_path,
         submission_method=req.submission_method,
     )
-    agent_config = await load_agent_config(req.config_file_path)
-    ctx = CheckContext(adapter=adapter, agent_config=agent_config)
-
-    await save_run_snapshot(req)
-
-    checks = [
-        ("Guardrail Compliance", guardrails.run),
-        ("Prompt Injection Resistance", prompt_injection.run),
-        ("Hallucination Rate", hallucination.run),
-        ("Behavioral Consistency", consistency.run),
-        ("Output Safety", safety.run),
-        ("Latency Profile", latency.run),
-        ("Data Privacy", data_privacy.run),
-        ("Bias & Fairness", bias.run),
-    ]
-
-    check_scores: dict[str, int] = {}
-    for name, fn in checks:
-        await set_check_status(req.run_id, name, "running")
-        await asyncio.sleep(random.uniform(0.8, 2.0))
-        result = await fn(ctx)
-        check_scores[name] = result["score"]
-        await set_check_result(req.run_id, name, result)
-
-    final = weighted_final_score(check_scores)
-    if req.run_type == "monitor":
-        from monitor import finalize_monitor_run
-
-        await finalize_monitor_run(req.run_id, req.agent_id, final)
-    else:
-        await finalize_run(req.run_id, req.agent_id, final)
-
-
-async def save_run_snapshot(req: VerifyRequest):
-    if not SUPABASE_URL:
+    if not adapter.can_invoke():
+        await _finish_unverifiable(
+            req, "No live endpoint. Behavioural verification needs a reachable agent endpoint."
+        )
         return
-    async with httpx.AsyncClient() as c:
-        await c.patch(
-            f"{SUPABASE_URL}/rest/v1/verification_runs",
-            params={"id": f"eq.{req.run_id}"},
-            headers=_supabase_headers(),
-            json={
-                "snapshot_framework": req.framework,
-                "snapshot_endpoint_url": req.endpoint_url,
-                "snapshot_config_path": req.config_file_path,
-                "submission_method": req.submission_method,
+    try:
+        await validate_endpoint(adapter.config.endpoint_url or "")
+    except UnsafeEndpointError as e:
+        await _finish_unverifiable(req, f"Endpoint rejected: {e}")
+        return
+
+    factory = ProbeFactory()
+    judge = get_judge()
+    category = req.category or await _agent_category(req.agent_id)
+    ctx = CheckContext(
+        adapter=adapter,
+        probes=factory,
+        judge=judge,
+        category=category,
+        agent_config=await load_agent_config(req.config_file_path),
+    )
+    log.info(
+        "run %s: seed=%s judge=%s category=%s",
+        req.run_id, factory.seed, judge.mode, resolve_category(category),
+    )
+
+    async def on_start(name: str) -> None:
+        await _patch_check(req.run_id, name, {"status": "running"})
+
+    async def on_done(name: str, result: dict[str, Any]) -> None:
+        await _patch_check(
+            req.run_id,
+            name,
+            {
+                "status": "passed" if check_passed(name, result) else "failed",
+                "score": result["score"],
+                "details": {**result["details"], "inconclusive": result.get("inconclusive", False)},
+                "completed_at": _now().isoformat(),
             },
         )
 
-
-def _supabase_headers():
-    return {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-    }
+    try:
+        _, outcome = await run_checks(ctx, on_start, on_done)
+    finally:
+        await adapter.aclose()
+    await _finalize(req, outcome, factory.seed, judge, resolve_category(category))
 
 
-async def _patch_check(run_id: str, name: str, body: dict) -> None:
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        print(f"[engine] Supabase not configured — skipping check update for {name}")
-        return
-    async with httpx.AsyncClient() as c:
-        r = await c.patch(
-            f"{SUPABASE_URL}/rest/v1/check_results",
-            params={"run_id": f"eq.{run_id}", "check_name": f"eq.{name}"},
-            headers=_supabase_headers(),
-            json=body,
+async def _agent_category(agent_id: str) -> str | None:
+    """Fallback for callers that don't send the category (older web deploys)."""
+    agent = await db.select_one("agents", {"id": f"eq.{agent_id}"})
+    return agent.get("category") if agent else None
+
+
+async def _finish_unverifiable(req: VerifyRequest, reason: str) -> None:
+    for name in CHECK_NAMES:
+        await _patch_check(
+            req.run_id,
+            name,
+            {
+                "status": "failed",
+                "score": 0,
+                "details": {"summary": reason, "inconclusive": True},
+                "completed_at": _now().isoformat(),
+            },
         )
-        if r.status_code >= 400:
-            print(f"[engine] check_results patch failed ({name}): {r.status_code} {r.text}")
+    await _finalize(req, Outcome(0, "inconclusive", (reason,)), None, None, None)
 
 
-async def set_check_status(run_id, name, status):
-    await _patch_check(run_id, name, {"status": status})
-
-
-async def set_check_result(run_id, name, result):
-    completed = datetime.datetime.utcnow().isoformat()
-    await _patch_check(
-        run_id,
-        name,
+async def _finalize(
+    req: VerifyRequest,
+    outcome: Outcome,
+    seed: int | None,
+    judge: Judge | None,
+    category: str | None,
+) -> None:
+    log.info("run %s: verdict=%s score=%s %s", req.run_id, outcome.verdict, outcome.score, outcome.reasons)
+    now = _now()
+    await db.patch(
+        "verification_runs",
+        {"id": f"eq.{req.run_id}"},
+        {"status": "completed", "final_score": outcome.score, "completed_at": now.isoformat()},
+    )
+    # Separate write so an un-migrated database (no 008) still records the core result.
+    await db.patch(
+        "verification_runs",
+        {"id": f"eq.{req.run_id}"},
         {
-            "status": "passed" if result["score"] >= 70 else "failed",
-            "score": result["score"],
-            "details": result.get("details"),
-            "completed_at": completed,
+            "verdict": outcome.verdict,
+            "summary": {
+                "reasons": list(outcome.reasons),
+                "probe_set_version": PROBE_SET_VERSION,
+                "competence_category": category,
+                "seed": str(seed) if seed is not None else None,
+                "judge_mode": judge.mode if judge else None,
+                "judge_model": judge.model if judge else None,
+            },
         },
     )
 
+    if req.run_type == "monitor":
+        from monitor import finalize_monitor_run
 
-async def finalize_run(run_id, agent_id, final_score):
-    issued = datetime.datetime.utcnow()
-    expires = issued + datetime.timedelta(days=90)
-    cert_id = f"VCT-{run_id[:8].upper()}"
-    status = "verified" if final_score >= 75 else "failed"
+        await finalize_monitor_run(req.run_id, req.agent_id, outcome)
+        return
 
-    async with httpx.AsyncClient() as c:
-        await c.patch(
-            f"{SUPABASE_URL}/rest/v1/verification_runs",
-            params={"id": f"eq.{run_id}"},
-            headers=_supabase_headers(),
-            json={
-                "status": "completed",
-                "final_score": final_score,
-                "completed_at": issued.isoformat(),
-            },
-        )
+    if outcome.verified:
         agent_patch = {
-            "status": status,
-            "score": final_score,
-            "updated_at": issued.isoformat(),
+            "status": "verified",
+            "score": outcome.score,
+            "certificate_id": f"VCT-{req.run_id[:8].upper()}",
+            "certificate_issued_at": now.isoformat(),
+            "certificate_expires_at": (now + datetime.timedelta(days=CERTIFICATE_DAYS)).isoformat(),
         }
-        if status == "verified":
-            agent_patch.update(
-                {
-                    "certificate_id": cert_id,
-                    "certificate_issued_at": issued.isoformat(),
-                    "certificate_expires_at": expires.isoformat(),
-                }
-            )
-        await c.patch(
-            f"{SUPABASE_URL}/rest/v1/agents",
-            params={"id": f"eq.{agent_id}"},
-            headers=_supabase_headers(),
-            json=agent_patch,
+    else:
+        agent_patch = {"status": "failed", "score": outcome.score, **_REVOKED_CERTIFICATE}
+    await db.patch(
+        "agents", {"id": f"eq.{req.agent_id}"}, {**agent_patch, "updated_at": now.isoformat()}
+    )
+
+
+_REVOKED_CERTIFICATE = {
+    "certificate_id": None,
+    "certificate_issued_at": None,
+    "certificate_expires_at": None,
+    "published_at": None,
+}
+
+
+async def _mark_errored(req: VerifyRequest, reason: str) -> None:
+    now = _now().isoformat()
+    await db.patch(
+        "check_results",
+        {"run_id": f"eq.{req.run_id}", "status": "in.(pending,running)"},
+        {"status": "failed", "details": {"summary": reason, "inconclusive": True}, "completed_at": now},
+    )
+    await db.patch(
+        "verification_runs",
+        {"id": f"eq.{req.run_id}"},
+        {"status": "failed", "completed_at": now},
+    )
+    await db.patch(
+        "verification_runs",
+        {"id": f"eq.{req.run_id}"},
+        {"verdict": "error", "summary": {"reasons": [reason]}},
+    )
+    if req.run_type != "monitor":
+        # Don't leave the agent stuck in "verifying"; the creator can re-run.
+        await db.patch(
+            "agents", {"id": f"eq.{req.agent_id}"}, {"status": "failed", "updated_at": now}
         )
+
+
+async def _patch_check(run_id: str, name: str, body: dict[str, Any]) -> None:
+    await db.patch(
+        "check_results", {"run_id": f"eq.{run_id}", "check_name": f"eq.{name}"}, body
+    )
+
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)

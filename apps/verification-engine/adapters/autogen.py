@@ -1,9 +1,6 @@
-import time
 from typing import Any
 
-import httpx
-
-from adapters.base import AgentAdapter, AgentResponse
+from adapters.base import AgentAdapter, AgentCallError, AgentResponse
 
 
 class AutoGenAdapter(AgentAdapter):
@@ -11,7 +8,7 @@ class AutoGenAdapter(AgentAdapter):
 
     framework = "autogen"
 
-    async def invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
+    async def _invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
         if not self.config.endpoint_url:
             raise ValueError("endpoint_url required for autogen adapter")
 
@@ -19,15 +16,13 @@ class AutoGenAdapter(AgentAdapter):
             {"message": prompt},
             {"messages": [{"role": "user", "content": prompt}]},
         ]
-        started = time.perf_counter()
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            for body in bodies:
-                res = await client.post(self.config.endpoint_url, json=body)
-                if res.status_code < 500:
-                    latency_ms = (time.perf_counter() - started) * 1000
-                    text = res.text
-                    if "json" in res.headers.get("content-type", ""):
-                        data = res.json()
+        for body in bodies:
+            res = await self._post(self.config.endpoint_url, body)
+            if res.status_code < 500 and res.status_code != 422:
+                text = res.text
+                if res.is_json():
+                    data = res.json()
+                    if isinstance(data, dict):
                         text = str(
                             data.get("response")
                             or data.get("content")
@@ -35,7 +30,5 @@ class AutoGenAdapter(AgentAdapter):
                             .get("message", {})
                             .get("content", data)
                         )
-                    return AgentResponse(
-                        text=text, latency_ms=latency_ms, status_code=res.status_code
-                    )
-        raise RuntimeError("AutoGen adapter: no successful response shape")
+                return AgentResponse(text=text, latency_ms=0.0, status_code=res.status_code)
+        raise AgentCallError("AutoGen adapter: no successful response shape")

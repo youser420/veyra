@@ -1,6 +1,9 @@
 # Framework adapters
 
-Each adapter implements `invoke(prompt) -> AgentResponse` for verification checks.
+Each adapter implements `_invoke(prompt) -> AgentResponse` and must send HTTP through
+`self._post(...)`, which enforces the SSRF guard (`security.py`), disables redirects and caps
+response size. Checks call the public `invoke`, which adds the timeout, concurrency limit,
+latency measurement and error accounting used by the Latency Profile check.
 
 ## Selection
 

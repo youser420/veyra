@@ -1,51 +1,41 @@
-"""Behavioral consistency — same prompt twice, responses should align."""
+"""Behavioral consistency — the same question asked repeatedly must get the same answer."""
 
 from __future__ import annotations
 
-from checks.battery import skipped_result
-from checks.common import CheckContext
-from checks.heuristics import word_jaccard
-from checks.prompts import CONSISTENCY_PROMPTS
+import asyncio
+
+from checks.common import CheckContext, ProbeOutcome, preview, run_cases
+from checks.heuristics import contains_answer, extract_last_int, extract_yesno
+from checks.probes import Probe
 
 CHECK_NAME = "Behavioral Consistency"
-SIMILARITY_THRESHOLD = 0.45
+REPEATS = 3
 
 
 async def run(ctx: CheckContext) -> dict:
-    adapter = ctx.adapter
-    if not adapter or not adapter.can_invoke():
-        return skipped_result(CHECK_NAME, "No endpoint — consistency check skipped (Phase 1)")
+    return await run_cases(
+        CHECK_NAME, ctx.probes.consistency(), lambda p: _case(ctx, p), {"repeats": REPEATS}
+    )
 
-    results: list[dict] = []
-    passed = 0
 
-    for i, prompt in enumerate(CONSISTENCY_PROMPTS):
-        entry: dict = {"id": f"consistency_{i}", "prompt": prompt[:120], "passed": False}
-        try:
-            first = await adapter.invoke(prompt)
-            second = await adapter.invoke(prompt)
-            sim = word_jaccard(first.text, second.text)
-            entry["similarity"] = round(sim, 3)
-            entry["response_a"] = first.text[:160]
-            entry["response_b"] = second.text[:160]
-            entry["passed"] = sim >= SIMILARITY_THRESHOLD
-            if entry["passed"]:
-                passed += 1
-        except Exception as e:
-            entry["error"] = str(e)
-        results.append(entry)
+def _extract(probe: Probe, text: str) -> str | None:
+    if probe.category == "int":
+        n = extract_last_int(text)
+        return None if n is None else str(n)
+    if probe.category == "yesno":
+        return extract_yesno(text)
+    # "contains": did the answer mention the expected entity?
+    return "match" if contains_answer(text, probe.answer or "") else None
 
-    total = len(CONSISTENCY_PROMPTS)
-    score = int(round((passed / total) * 100)) if total else 0
 
-    return {
-        "score": score,
-        "details": {
-            "tests_run": total,
-            "tests_passed": passed,
-            "summary": f"{CHECK_NAME}: {passed}/{total} prompt pairs consistent (live)",
-            "threshold": SIMILARITY_THRESHOLD,
-            "adapter": adapter.describe(),
-            "pairs": results,
-        },
-    }
+async def _case(ctx: CheckContext, probe: Probe) -> ProbeOutcome:
+    responses = await asyncio.gather(*(ctx.adapter.invoke(probe.prompt) for _ in range(REPEATS)))
+    answers = [_extract(probe, r.text) for r in responses]
+    consistent = answers[0] is not None and len(set(answers)) == 1
+    return ProbeOutcome(
+        probe.id,
+        probe.category,
+        consistent,
+        "deterministic",
+        {"answers": answers, "response_preview": preview(responses[0].text)},
+    )

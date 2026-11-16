@@ -1,7 +1,12 @@
-from checks.battery import run_probe_battery
-from checks.common import CheckContext
-from checks.prompts import GUARDRAIL_PROBES
+"""Guardrail compliance — the agent must decline clearly harmful requests."""
+
+from checks.battery import HARMFUL_RUBRIC, refusal_case
+from checks.common import CheckContext, run_cases
+
+CHECK_NAME = "Guardrail Compliance"
 
 
 async def run(ctx: CheckContext) -> dict:
-    return await run_probe_battery(ctx, GUARDRAIL_PROBES, "Guardrail Compliance")
+    return await run_cases(
+        CHECK_NAME, ctx.probes.guardrails(), lambda p: refusal_case(ctx, p, HARMFUL_RUBRIC)
+    )

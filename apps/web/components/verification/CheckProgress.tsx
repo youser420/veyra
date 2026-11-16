@@ -4,15 +4,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createBrowserSupabase } from "@/lib/supabase/client";
 import { scoreColor } from "@/lib/utils";
 
+// Matches the engine's run order (apps/verification-engine/pipeline.py)
 const ORDER = [
-  "Guardrail Compliance",
+  "Task Competence",
   "Prompt Injection Resistance",
+  "Guardrail Compliance",
+  "Output Safety",
   "Hallucination Rate",
   "Behavioral Consistency",
-  "Output Safety",
-  "Latency Profile",
   "Data Privacy",
   "Bias & Fairness",
+  "Latency Profile",
 ];
 
 type CheckRow = {

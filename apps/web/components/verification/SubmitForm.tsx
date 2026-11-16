@@ -7,6 +7,7 @@ import { createBrowserSupabase } from "@/lib/supabase/client";
 import { AGENT_FRAMEWORKS, type AgentFrameworkId } from "@/lib/constants/frameworks";
 import type { AgentPrefill } from "@/types";
 
+// Each category has its own competence tasks in apps/verification-engine/checks/domains.py
 const CATEGORIES = [
   "General",
   "Legal",

@@ -1,8 +1,5 @@
 import os
-import time
 from typing import Any
-
-import httpx
 
 from adapters.base import AgentAdapter, AgentResponse
 
@@ -15,7 +12,7 @@ class DifyAdapter(AgentAdapter):
 
     framework = "dify"
 
-    async def invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
+    async def _invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
         if not self.config.endpoint_url:
             raise ValueError("endpoint_url required for dify adapter")
 
@@ -28,10 +25,7 @@ class DifyAdapter(AgentAdapter):
             "user": "veyra-verification",
         }
 
-        started = time.perf_counter()
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            res = await client.post(self.config.endpoint_url, json=body, headers=headers)
-        latency_ms = (time.perf_counter() - started) * 1000
-        data = res.json() if res.content else {}
+        res = await self._post(self.config.endpoint_url, body, headers=headers)
+        data = res.json() if res.content and res.is_json() else {}
         text = str(data.get("answer") or data.get("message") or res.text)
-        return AgentResponse(text=text, latency_ms=latency_ms, status_code=res.status_code, raw=data)
+        return AgentResponse(text=text, latency_ms=0.0, status_code=res.status_code)

@@ -6,115 +6,84 @@ import datetime
 import os
 from typing import Any
 
-import httpx
-
-from checks.scoring import VERIFY_PASS_THRESHOLD
+import db
+from checks.scoring import Outcome
 from incidents import create_incident
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 MONITOR_INTERVAL_DAYS = int(os.getenv("MONITOR_INTERVAL_DAYS", "7"))
+UNREACHABLE_RETRY_HOURS = 24
+CERTIFICATE_DAYS = 90
 
 
-def _headers() -> dict[str, str]:
-    return {
-        "apikey": SUPABASE_SERVICE_KEY or "",
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
-async def _get_agent(agent_id: str) -> dict[str, Any] | None:
-    async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/agents",
-            params={"id": f"eq.{agent_id}", "select": "*"},
-            headers=_headers(),
-        )
-        if r.status_code >= 400:
-            return None
-        rows = r.json()
-        return rows[0] if rows else None
-
-
-async def finalize_monitor_run(run_id: str, agent_id: str, final_score: int) -> None:
-    now = datetime.datetime.utcnow()
-    agent = await _get_agent(agent_id)
+async def finalize_monitor_run(run_id: str, agent_id: str, outcome: Outcome) -> None:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    agent = await db.select_one("agents", {"id": f"eq.{agent_id}"})
     if not agent:
         return
 
     previous_score = agent.get("score")
-    creator_id = agent["creator_id"]
     was_published = agent.get("status") == "published"
+    name = agent.get("name", "Agent")
+    reasons = "; ".join(outcome.reasons)
 
-    async with httpx.AsyncClient() as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/verification_runs",
-            params={"id": f"eq.{run_id}"},
-            headers=_headers(),
-            json={
-                "status": "completed",
-                "final_score": final_score,
-                "completed_at": now.isoformat(),
-            },
-        )
-
-    next_monitor = now + datetime.timedelta(days=MONITOR_INTERVAL_DAYS)
-    monitor_patch: dict[str, Any] = {
-        "score": final_score,
+    patch: dict[str, Any] = {
         "last_monitored_at": now.isoformat(),
-        "next_monitor_at": next_monitor.isoformat(),
+        "next_monitor_at": (now + datetime.timedelta(days=MONITOR_INTERVAL_DAYS)).isoformat(),
         "updated_at": now.isoformat(),
     }
-
     incident: dict[str, Any] | None = None
+    base = {
+        "agent_id": agent_id,
+        "creator_id": agent["creator_id"],
+        "run_id": run_id,
+        "previous_score": previous_score,
+        "current_score": outcome.score,
+    }
 
-    if final_score < VERIFY_PASS_THRESHOLD:
-        monitor_patch["status"] = "failed"
-        monitor_patch["published_at"] = None
+    if outcome.verdict == "inconclusive":
+        # Could be a transient outage: keep the listing, flag it, and re-check soon.
+        patch["next_monitor_at"] = (now + datetime.timedelta(hours=UNREACHABLE_RETRY_HOURS)).isoformat()
         incident = {
-            "agent_id": agent_id,
-            "creator_id": creator_id,
-            "run_id": run_id,
-            "incident_type": "verify_failed",
-            "severity": "critical",
-            "title": f"Monitor failed: {agent.get('name', 'Agent')}",
-            "description": f"Scheduled monitor scored {final_score} (threshold {VERIFY_PASS_THRESHOLD}). Agent unpublished.",
-            "previous_score": previous_score,
-            "current_score": final_score,
-            "auto_action": "unpublished" if was_published else None,
-        }
-    elif (
-        previous_score is not None
-        and final_score < previous_score - 10
-    ):
-        incident = {
-            "agent_id": agent_id,
-            "creator_id": creator_id,
-            "run_id": run_id,
-            "incident_type": "score_drop",
-            "severity": "medium",
-            "title": f"Trust score dropped: {agent.get('name', 'Agent')}",
-            "description": f"Score fell from {previous_score} to {final_score} during scheduled monitor.",
-            "previous_score": previous_score,
-            "current_score": final_score,
+            **base,
+            "incident_type": "endpoint_unreachable",
+            "severity": "high",
+            "title": f"Monitor could not reach: {name}",
+            "description": f"Scheduled monitor was inconclusive ({reasons}). Retrying in {UNREACHABLE_RETRY_HOURS}h.",
             "auto_action": None,
         }
-        if was_published:
-            expires = now + datetime.timedelta(days=90)
-            monitor_patch["certificate_expires_at"] = expires.isoformat()
-    else:
-        if was_published:
-            expires = now + datetime.timedelta(days=90)
-            monitor_patch["certificate_expires_at"] = expires.isoformat()
-
-    async with httpx.AsyncClient() as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/agents",
-            params={"id": f"eq.{agent_id}"},
-            headers=_headers(),
-            json=monitor_patch,
+    elif outcome.verdict == "failed":
+        patch.update(
+            {
+                "score": outcome.score,
+                "status": "failed",
+                "published_at": None,
+                "certificate_id": None,
+                "certificate_issued_at": None,
+                "certificate_expires_at": None,
+            }
         )
+        incident = {
+            **base,
+            "incident_type": "verify_failed",
+            "severity": "critical",
+            "title": f"Monitor failed: {name}",
+            "description": f"Scheduled monitor failed: {reasons}. Certificate revoked and agent unpublished.",
+            "auto_action": "unpublished" if was_published else None,
+        }
+    else:
+        patch["score"] = outcome.score
+        if was_published:
+            patch["certificate_expires_at"] = (now + datetime.timedelta(days=CERTIFICATE_DAYS)).isoformat()
+        if previous_score is not None and outcome.score < previous_score - 10:
+            incident = {
+                **base,
+                "incident_type": "score_drop",
+                "severity": "medium",
+                "title": f"Trust score dropped: {name}",
+                "description": f"Score fell from {previous_score} to {outcome.score} during scheduled monitor.",
+                "auto_action": None,
+            }
 
+    await db.patch("agents", {"id": f"eq.{agent_id}"}, patch)
     if incident:
         await create_incident(incident)

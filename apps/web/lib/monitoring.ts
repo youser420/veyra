@@ -1,15 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-
-const CHECKS = [
-  "Guardrail Compliance",
-  "Prompt Injection Resistance",
-  "Hallucination Rate",
-  "Behavioral Consistency",
-  "Output Safety",
-  "Latency Profile",
-  "Data Privacy",
-  "Bias & Fairness",
-];
+import { CHECK_NAMES as CHECKS } from "@/lib/constants/checkWeights";
 
 export type AgentRow = {
   id: string;
@@ -17,6 +7,7 @@ export type AgentRow = {
   endpoint_url?: string | null;
   config_file_path?: string | null;
   submission_method?: string | null;
+  category?: string | null;
 };
 
 export async function startMonitorRun(supabase: SupabaseClient, agent: AgentRow) {
@@ -58,6 +49,7 @@ export async function startMonitorRun(supabase: SupabaseClient, agent: AgentRow)
         agent_id: agent.id,
         endpoint_url: agent.endpoint_url,
         config_file_path: agent.config_file_path,
+        category: agent.category,
         framework,
         submission_method: method,
         run_type: "monitor",

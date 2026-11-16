@@ -1,9 +1,6 @@
-import time
 from typing import Any
 
-import httpx
-
-from adapters.base import AgentAdapter, AgentResponse, AdapterConfig
+from adapters.base import AgentAdapter, AgentCallError, AgentResponse, HttpResult
 
 
 class LangChainAdapter(AgentAdapter):
@@ -21,7 +18,7 @@ class LangChainAdapter(AgentAdapter):
             return base
         return f"{base}/invoke"
 
-    async def invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
+    async def _invoke(self, prompt: str, **kwargs: Any) -> AgentResponse:
         url = self._invoke_url()
         payloads = [
             {"input": {"question": prompt}},
@@ -29,33 +26,30 @@ class LangChainAdapter(AgentAdapter):
             {"input": prompt},
         ]
 
-        started = time.perf_counter()
-        last_error: Exception | None = None
+        last_status = None
+        for body in payloads:
+            res = await self._post(url, body)
+            last_status = res.status_code
+            # 422 = LangServe schema mismatch; try the next payload shape.
+            if res.status_code < 500 and res.status_code != 422:
+                return AgentResponse(
+                    text=_extract_langchain_output(res),
+                    latency_ms=0.0,
+                    status_code=res.status_code,
+                    raw={"payload_shape": list(body.keys())},
+                )
 
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            for body in payloads:
-                try:
-                    res = await client.post(url, json=body)
-                    if res.status_code < 500:
-                        latency_ms = (time.perf_counter() - started) * 1000
-                        return AgentResponse(
-                            text=_extract_langchain_output(res),
-                            latency_ms=latency_ms,
-                            status_code=res.status_code,
-                            raw={"invoke_url": url, "payload_shape": list(body.keys())},
-                        )
-                except Exception as e:
-                    last_error = e
-
-        raise RuntimeError(f"LangChain adapter failed: {last_error}")
+        raise AgentCallError(f"LangChain adapter: no payload shape accepted (last HTTP {last_status})")
 
 
-def _extract_langchain_output(res: httpx.Response) -> str:
+def _extract_langchain_output(res: HttpResult) -> str:
+    if not res.is_json():
+        return res.text
     data = res.json()
     if isinstance(data, dict):
         output = data.get("output") or data.get("result")
         if isinstance(output, dict):
-            for key in ("question", "answer", "text", "output", "result"):
+            for key in ("answer", "text", "output", "result", "content"):
                 if key in output:
                     return str(output[key])
             return str(output)
